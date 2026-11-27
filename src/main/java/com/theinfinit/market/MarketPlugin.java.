@@ -1,15 +1,45 @@
-if (title.equals("§8Confirmar troca")) {
-    e.setCancelled(true);
+package com.theinfinit.market;
 
-    String id = pending.get(p.getUniqueId());
-    if (id == null) return;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 
-    if (e.getRawSlot() == 13) {
-        purchase(p, id);
-    } else if (e.getRawSlot() == 22) {
-        pending.remove(p.getUniqueId());
-        p.closeInventory();
-        p.sendMessage("§cCompra cancelada!");
+// Dentro da classe MarketPlugin:
+
+@EventHandler
+public void onMarketClick(InventoryClickEvent e) {
+    if (!(e.getWhoClicked() instanceof Player p)) return;
+
+    String title = e.getView().getTitle();
+
+    if (title.equals("§8Confirmar troca")) {
+        e.setCancelled(true);
+
+        String id = pending.get(p.getUniqueId());
+        if (id == null) return;
+
+        if (e.getRawSlot() == 13) {
+            purchase(p, id);
+
+        } else if (e.getRawSlot() == 22) {
+            pending.remove(p.getUniqueId());
+            p.closeInventory();
+            p.sendMessage("§cCompra cancelada!");
+        }
+
+        return;
     }
-    return;
+}
+
+@EventHandler
+public void onMarketClose(InventoryCloseEvent e) {
+    if (!e.getView().getTitle().equals("§8Confirmar troca")) return;
+
+    pending.remove(e.getPlayer().getUniqueId());
+}
+
+@EventHandler
+public void onPlayerQuit(PlayerQuitEvent e) {
+    pending.remove(e.getPlayer().getUniqueId());
 }
