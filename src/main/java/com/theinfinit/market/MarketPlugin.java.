@@ -1,45 +1,768 @@
+
 package com.theinfinit.market;
 
+import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.OfflinePlayer;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.command.TabCompleter;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.plugin.java.JavaPlugin;
 
-// Dentro da classe MarketPlugin:
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
-@EventHandler
-public void onMarketClick(InventoryClickEvent e) {
-    if (!(e.getWhoClicked() instanceof Player p)) return;
+public final class MarketPlugin extends JavaPlugin
+        implements Listener, CommandExecutor, TabCompleter {
 
-    String title = e.getView().getTitle();
+    private static final String MARKET_TITLE = "§8THE INFINIT | Mercado";
+    private static final String CONFIRM_TITLE = "§8Confirmar troca";
 
-    if (title.equals("§8Confirmar troca")) {
-        e.setCancelled(true);
+    private static final int[] MARKET_SLOTS = {
+            10, 11, 12, 13, 14, 15, 16,
+            19, 20, 21, 22, 23, 24, 25,
+            28, 29, 30, 31, 32, 33, 34,
+            37, 38, 39, 40, 41, 42, 43
+    };
 
-        String id = pending.get(p.getUniqueId());
-        if (id == null) return;
+    private final Map<String, Offer> offers = new HashMap<>();
+    private final Map<UUID, String> pending = new HashMap<>();
 
-        if (e.getRawSlot() == 13) {
-            purchase(p, id);
+    @Override
+    public void onEnable() {
+        saveDefaultConfig();
+        loadOffers();
 
-        } else if (e.getRawSlot() == 22) {
-            pending.remove(p.getUniqueId());
-            p.closeInventory();
-            p.sendMessage("§cCompra cancelada!");
+        Bukkit.getPluginManager().registerEvents(this, this);
+
+        if (getCommand("loja") != null) {
+            getCommand("loja").setExecutor(this);
+            getCommand("loja").setTabCompleter(this);
         }
 
-        return;
+        if (getCommand("store") != null) {
+            getCommand("store").setExecutor(this);
+            getCommand("store").setTabCompleter(this);
+        }
+
+        getLogger().info(
+                "THE INFINIT MARKET carregado: "
+                        + offers.size() + " oferta(s)."
+        );
     }
-}
 
-@EventHandler
-public void onMarketClose(InventoryCloseEvent e) {
-    if (!e.getView().getTitle().equals("§8Confirmar troca")) return;
+    @Override
+    public void onDisable() {
+        saveOffers();
+        pending.clear();
+    }
 
-    pending.remove(e.getPlayer().getUniqueId());
-}
+    private void loadOffers() {
+        offers.clear();
 
-@EventHandler
-public void onPlayerQuit(PlayerQuitEvent e) {
-    pending.remove(e.getPlayer().getUniqueId());
+        ConfigurationSection section =
+                getConfig().getConfigurationSection("offers");
+
+        if (section == null) return;
+
+        for (String id : section.getKeys(false)) {
+            String path = "offers." + id + ".";
+
+            String sellerText =
+                    getConfig().getString(path + "seller");
+
+            ItemStack offered =
+                    getConfig().getItemStack(path + "offered");
+
+            ItemStack wanted =
+                    getConfig().getItemStack(path + "wanted");
+
+            String sellerName =
+                    getConfig().getString(path + "seller-name", "Jogador");
+
+            if (sellerText == null || offered == null || wanted == null
+                    || offered.getType().isAir()
+                    || wanted.getType().isAir()) {
+                continue;
+            }
+
+            try {
+                offers.put(id, new Offer(
+                        id,
+                        UUID.fromString(sellerText),
+                        sellerName,
+                        offered,
+                        wanted
+                ));
+            } catch (IllegalArgumentException ignored) {
+                getLogger().warning(
+                        "Oferta ignorada por UUID inválido: " + id
+                );
+            }
+        }
+    }
+
+    private void saveOffers() {
+        getConfig().set("offers", null);
+
+        for (Offer offer : offers.values()) {
+            String path = "offers." + offer.id + ".";
+
+            getConfig().set(path + "seller", offer.seller.toString());
+            getConfig().set(path + "seller-name", offer.sellerName);
+            getConfig().set(path + "offered", offer.offered);
+            getConfig().set(path + "wanted", offer.wanted);
+        }
+
+        saveConfig();
+    }
+
+    @Override
+    public boolean onCommand(
+            CommandSender sender,
+            Command command,
+            String label,
+            String[] args
+    ) {
+        String name = command.getName().toLowerCase();
+
+        if (name.equals("loja")) {
+            if (!(sender instanceof Player player)) {
+                sender.sendMessage(
+                        "Este comando só pode ser usado dentro do jogo."
+                );
+                return true;
+            }
+
+            openMarket(player);
+            return true;
+        }
+
+        if (!name.equals("store")) return false;
+
+        if (!(sender instanceof Player player)) {
+            sender.sendMessage(
+                    "Este comando só pode ser usado dentro do jogo."
+            );
+            return true;
+        }
+
+        if (args.length == 0 || args[0].equalsIgnoreCase("ajuda")) {
+            sendHelp(player);
+            return true;
+        }
+
+        switch (args[0].toLowerCase()) {
+            case "criar", "create" -> createOffer(player, args);
+            case "minhas", "mine" -> listOwnOffers(player);
+            case "cancelar", "cancel" -> cancelOffer(player, args);
+            case "coletar", "claim" -> collectClaims(player);
+            default -> sendHelp(player);
+        }
+
+        return true;
+    }
+
+    private void sendHelp(Player player) {
+        player.sendMessage("§6§lTHE INFINIT MARKET §7| Ajuda");
+        player.sendMessage("§e/loja §7- abre o mercado público");
+        player.sendMessage(
+                "§e/store criar <qtd-pagamento> <material> "
+                        + "§7- anuncia o item da sua mão"
+        );
+        player.sendMessage("§e/store minhas §7- mostra suas ofertas");
+        player.sendMessage(
+                "§e/store cancelar <id> §7- cancela uma oferta sua"
+        );
+        player.sendMessage(
+                "§e/store coletar §7- recebe itens de vendas/cancelamentos"
+        );
+        player.sendMessage(
+                "§8Exemplo: segure 3 diamantes e use "
+                        + "/store criar 16 iron_ingot"
+        );
+    }
+
+    private void createOffer(Player player, String[] args) {
+        if (args.length < 3) {
+            player.sendMessage(
+                    "§cUso: /store criar <quantidade-pagamento> <material>"
+            );
+            return;
+        }
+
+        ItemStack hand =
+                player.getInventory().getItemInMainHand();
+
+        if (hand.getType().isAir()) {
+            player.sendMessage(
+                    "§cSegure na mão o item que deseja anunciar."
+            );
+            return;
+        }
+
+        int amount;
+        Material wantedType;
+
+        try {
+            amount = Integer.parseInt(args[1]);
+            wantedType = Material.matchMaterial(args[2]);
+        } catch (NumberFormatException ex) {
+            player.sendMessage("§cQuantidade inválida.");
+            return;
+        }
+
+        if (amount < 1 || amount > 64
+                || wantedType == null
+                || wantedType.isAir()
+                || !wantedType.isItem()) {
+            player.sendMessage(
+                    "§cUse uma quantidade de 1 a 64 e um material válido."
+            );
+            return;
+        }
+
+        if (wantedType == hand.getType()) {
+            player.sendMessage(
+                    "§cO item oferecido e o pagamento não podem ser iguais."
+            );
+            return;
+        }
+
+        ItemStack offered = hand.clone();
+        ItemStack wanted = new ItemStack(wantedType, amount);
+
+        String id = UUID.randomUUID().toString().substring(0, 8);
+
+        hand.setAmount(0);
+
+        offers.put(id, new Offer(
+                id,
+                player.getUniqueId(),
+                player.getName(),
+                offered,
+                wanted
+        ));
+
+        saveOffers();
+
+        player.sendMessage("§aOferta criada! §7ID: §f" + id);
+        player.sendMessage(
+                "§7Você anunciou §f" + describe(offered)
+                        + " §7por §f" + describe(wanted) + "§7."
+        );
+    }
+
+    private void openMarket(Player player) {
+        Inventory inv =
+                Bukkit.createInventory(null, 54, MARKET_TITLE);
+
+        ItemStack pane =
+                named(Material.GRAY_STAINED_GLASS_PANE, "§r");
+
+        for (int i = 0; i < inv.getSize(); i++) {
+            if (i < 9 || i >= 45 || i % 9 == 0 || i % 9 == 8) {
+                inv.setItem(i, pane);
+            }
+        }
+
+        ItemStack info =
+                named(Material.BOOK, "§eComo comprar");
+
+        ItemMeta infoMeta = info.getItemMeta();
+
+        infoMeta.setLore(List.of(
+                "§7Clique em uma oferta para ver",
+                "§7a confirmação da troca.",
+                "§aVerde confirma. §cVermelho cancela."
+        ));
+
+        info.setItemMeta(infoMeta);
+        inv.setItem(4, info);
+
+        int index = 0;
+
+        for (Offer offer : offers.values()) {
+            if (index >= MARKET_SLOTS.length) break;
+
+            ItemStack icon = offer.offered.clone();
+            ItemMeta meta = icon.getItemMeta();
+
+            List<String> lore = new ArrayList<>();
+
+            lore.add("§7Vendedor: §f" + offer.sellerName);
+            lore.add("§7Pede: §e" + describe(offer.wanted));
+            lore.add("§8ID: " + offer.id);
+            lore.add("§aClique para ver a troca");
+
+            meta.setLore(lore);
+            icon.setItemMeta(meta);
+
+            inv.setItem(MARKET_SLOTS[index++], icon);
+        }
+
+        if (offers.isEmpty()) {
+            inv.setItem(
+                    22,
+                    named(Material.BARRIER,
+                            "§cNão há ofertas no momento")
+            );
+        }
+
+        player.openInventory(inv);
+    }
+
+    private void openConfirmation(Player player, Offer offer) {
+        Inventory inv =
+                Bukkit.createInventory(null, 27, CONFIRM_TITLE);
+
+        ItemStack offered = offer.offered.clone();
+        ItemMeta offeredMeta = offered.getItemMeta();
+
+        offeredMeta.setDisplayName("§aVocê recebe");
+        offeredMeta.setLore(List.of(
+                "§f" + describe(offer.offered),
+                "§7Vendedor: §f" + offer.sellerName
+        ));
+
+        offered.setItemMeta(offeredMeta);
+        inv.setItem(11, offered);
+
+        ItemStack payment = offer.wanted.clone();
+        ItemMeta paymentMeta = payment.getItemMeta();
+
+        paymentMeta.setDisplayName("§cVocê paga");
+        paymentMeta.setLore(List.of(
+                "§f" + describe(offer.wanted)
+        ));
+
+        payment.setItemMeta(paymentMeta);
+        inv.setItem(15, payment);
+
+        ItemStack confirm =
+                named(Material.LIME_DYE, "§a§lCONFIRMAR COMPRA");
+
+        ItemMeta confirmMeta = confirm.getItemMeta();
+
+        confirmMeta.setLore(List.of(
+                "§7Clique para concluir a troca."
+        ));
+
+        confirm.setItemMeta(confirmMeta);
+        inv.setItem(13, confirm);
+
+        ItemStack cancel =
+                named(Material.RED_DYE, "§c§lCANCELAR");
+
+        ItemMeta cancelMeta = cancel.getItemMeta();
+
+        cancelMeta.setLore(List.of(
+                "§7Clique para desistir da compra."
+        ));
+
+        cancel.setItemMeta(cancelMeta);
+        inv.setItem(22, cancel);
+
+        pending.put(player.getUniqueId(), offer.id);
+        player.openInventory(inv);
+    }
+
+    @EventHandler
+    public void onMarketClick(InventoryClickEvent e) {
+        if (!(e.getWhoClicked() instanceof Player player)) return;
+
+        String title = e.getView().getTitle();
+
+        if (MARKET_TITLE.equals(title)) {
+            e.setCancelled(true);
+
+            if (e.getRawSlot() < 0
+                    || e.getRawSlot()
+                    >= e.getView().getTopInventory().getSize()) {
+                return;
+            }
+
+            int slot = e.getRawSlot();
+
+            for (int i = 0; i < MARKET_SLOTS.length; i++) {
+                if (MARKET_SLOTS[i] != slot) continue;
+
+                if (i >= offers.size()) return;
+
+                Offer offer =
+                        new ArrayList<>(offers.values()).get(i);
+
+                if (offer.seller.equals(player.getUniqueId())) {
+                    player.sendMessage(
+                            "§cVocê não pode comprar sua própria oferta."
+                    );
+                    return;
+                }
+
+                openConfirmation(player, offer);
+                return;
+            }
+
+            return;
+        }
+
+        if (CONFIRM_TITLE.equals(title)) {
+            e.setCancelled(true);
+
+            if (e.getRawSlot() < 0
+                    || e.getRawSlot()
+                    >= e.getView().getTopInventory().getSize()) {
+                return;
+            }
+
+            String id = pending.get(player.getUniqueId());
+
+            if (id == null) return;
+
+            if (e.getRawSlot() == 13) {
+                purchase(player, id);
+
+            } else if (e.getRawSlot() == 22) {
+                pending.remove(player.getUniqueId());
+                player.closeInventory();
+                player.sendMessage("§cCompra cancelada!");
+            }
+        }
+    }
+
+    private void purchase(Player buyer, String id) {
+        Offer offer = offers.get(id);
+
+        if (offer == null) {
+            pending.remove(buyer.getUniqueId());
+            buyer.closeInventory();
+            buyer.sendMessage(
+                    "§cEssa oferta não existe mais."
+            );
+            return;
+        }
+
+        if (offer.seller.equals(buyer.getUniqueId())) {
+            buyer.sendMessage(
+                    "§cVocê não pode comprar sua própria oferta."
+            );
+            return;
+        }
+
+        if (!hasItems(buyer, offer.wanted)) {
+            buyer.sendMessage(
+                    "§cVocê não tem "
+                            + describe(offer.wanted)
+                            + " para pagar."
+            );
+            return;
+        }
+
+        removeItems(buyer, offer.wanted);
+
+        Map<Integer, ItemStack> leftovers =
+                buyer.getInventory().addItem(offer.offered.clone());
+
+        for (ItemStack leftover : leftovers.values()) {
+            buyer.getWorld().dropItemNaturally(
+                    buyer.getLocation(),
+                    leftover
+            );
+        }
+
+        addClaim(offer.seller, offer.wanted);
+
+        offers.remove(id);
+        pending.remove(buyer.getUniqueId());
+
+        saveOffers();
+
+        buyer.closeInventory();
+
+        buyer.sendMessage(
+                "§aTroca concluída! Você recebeu "
+                        + describe(offer.offered) + "."
+        );
+
+        OfflinePlayer seller =
+                Bukkit.getOfflinePlayer(offer.seller);
+
+        if (seller.isOnline() && seller.getPlayer() != null) {
+            seller.getPlayer().sendMessage(
+                    "§aSua oferta " + id
+                            + " foi comprada! Use §f/store coletar "
+                            + "§apara receber o pagamento."
+            );
+        }
+    }
+
+    private boolean hasItems(Player player, ItemStack wanted) {
+        int count = 0;
+
+        for (ItemStack item :
+                player.getInventory().getStorageContents()) {
+
+            if (item == null
+                    || item.getType() != wanted.getType()) {
+                continue;
+            }
+
+            if (item.isSimilar(wanted)) {
+                count += item.getAmount();
+            }
+        }
+
+        return count >= wanted.getAmount();
+    }
+
+    private void removeItems(Player player, ItemStack wanted) {
+        int remaining = wanted.getAmount();
+
+        ItemStack[] contents =
+                player.getInventory().getStorageContents();
+
+        for (int i = 0;
+                i < contents.length && remaining > 0;
+                i++) {
+
+            ItemStack item = contents[i];
+
+            if (item == null || !item.isSimilar(wanted)) {
+                continue;
+            }
+
+            int take = Math.min(
+                    remaining,
+                    item.getAmount()
+            );
+
+            item.setAmount(item.getAmount() - take);
+            remaining -= take;
+
+            if (item.getAmount() <= 0) {
+                contents[i] = null;
+            }
+        }
+
+        player.getInventory().setStorageContents(contents);
+    }
+
+    private void addClaim(UUID owner, ItemStack item) {
+        String path = "claims." + owner;
+
+        List<ItemStack> items = new ArrayList<>();
+
+        List<?> stored = getConfig().getList(path);
+
+        if (stored != null) {
+            for (Object value : stored) {
+                if (value instanceof ItemStack stack) {
+                    items.add(stack);
+                }
+            }
+        }
+
+        items.add(item.clone());
+
+        getConfig().set(path, items);
+        saveConfig();
+    }
+
+    private void collectClaims(Player player) {
+        String path = "claims." + player.getUniqueId();
+
+        List<?> stored = getConfig().getList(path);
+
+        if (stored == null || stored.isEmpty()) {
+            player.sendMessage(
+                    "§7Você não tem itens para coletar."
+            );
+            return;
+        }
+
+        List<ItemStack> remaining = new ArrayList<>();
+
+        for (Object value : stored) {
+            if (!(value instanceof ItemStack stack)) {
+                continue;
+            }
+
+            Map<Integer, ItemStack> leftovers =
+                    player.getInventory().addItem(stack.clone());
+
+            remaining.addAll(leftovers.values());
+        }
+
+        if (remaining.isEmpty()) {
+            getConfig().set(path, null);
+        } else {
+            getConfig().set(path, remaining);
+        }
+
+        saveConfig();
+
+        player.sendMessage(
+                remaining.isEmpty()
+                        ? "§aItens coletados!"
+                        : "§eSeu inventário encheu. O restante continua guardado."
+        );
+    }
+
+    private void listOwnOffers(Player player) {
+        boolean found = false;
+
+        player.sendMessage("§6§lSuas ofertas:");
+
+        for (Offer offer : offers.values()) {
+            if (!offer.seller.equals(player.getUniqueId())) {
+                continue;
+            }
+
+            found = true;
+
+            player.sendMessage(
+                    "§e" + offer.id
+                            + " §7| Oferece: §f"
+                            + describe(offer.offered)
+                            + " §7| Pede: §f"
+                            + describe(offer.wanted)
+            );
+        }
+
+        if (!found) {
+            player.sendMessage(
+                    "§7Você não tem ofertas ativas."
+            );
+        }
+    }
+
+    private void cancelOffer(Player player, String[] args) {
+        if (args.length < 2) {
+            player.sendMessage(
+                    "§cUso: /store cancelar <id>"
+            );
+            return;
+        }
+
+        Offer found = null;
+
+        for (Offer offer : offers.values()) {
+            if (offer.id.equalsIgnoreCase(args[1])
+                    && offer.seller.equals(player.getUniqueId())) {
+                found = offer;
+                break;
+            }
+        }
+
+        if (found == null) {
+            player.sendMessage(
+                    "§cOferta não encontrada ou não pertence a você."
+            );
+            return;
+        }
+
+        addClaim(player.getUniqueId(), found.offered);
+
+        offers.remove(found.id);
+        saveOffers();
+
+        player.sendMessage(
+                "§aOferta cancelada. Use §f/store coletar "
+                        + "§apara recuperar os itens."
+        );
+    }
+
+    @EventHandler
+    public void onMarketClose(InventoryCloseEvent e) {
+        if (!CONFIRM_TITLE.equals(e.getView().getTitle())) {
+            return;
+        }
+
+        pending.remove(e.getPlayer().getUniqueId());
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent e) {
+        pending.remove(e.getPlayer().getUniqueId());
+    }
+
+    private static ItemStack named(
+            Material material,
+            String name
+    ) {
+        ItemStack item = new ItemStack(material);
+
+        ItemMeta meta = item.getItemMeta();
+        meta.setDisplayName(name);
+
+        item.setItemMeta(meta);
+
+        return item;
+    }
+
+    private static String describe(ItemStack item) {
+        String name = item.getType()
+                .name()
+                .toLowerCase()
+                .replace('_', ' ');
+
+        return item.getAmount() + "x " + name;
+    }
+
+    @Override
+    public List<String> onTabComplete(
+            CommandSender sender,
+            Command command,
+            String alias,
+            String[] args
+    ) {
+        if (command.getName().equalsIgnoreCase("store")
+                && args.length == 1) {
+            return List.of(
+                    "criar",
+                    "minhas",
+                    "cancelar",
+                    "coletar",
+                    "ajuda"
+            );
+        }
+
+        return List.of();
+    }
+
+    private static final class Offer {
+        private final String id;
+        private final UUID seller;
+        private final String sellerName;
+        private final ItemStack offered;
+        private final ItemStack wanted;
+
+        private Offer(
+                String id,
+                UUID seller,
+                String sellerName,
+                ItemStack offered,
+                ItemStack wanted
+        ) {
+            this.id = id;
+            this.seller = seller;
+            this.sellerName = sellerName;
+            this.offered = offered.clone();
+            this.wanted = wanted.clone();
+        }
+    }
 }
