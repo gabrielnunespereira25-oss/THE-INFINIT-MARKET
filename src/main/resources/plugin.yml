@@ -1,0 +1,19 @@
+
+name: TheInfinitMarket
+version: 1.0.0
+main: com.theinfinit.market.MarketPlugin
+api-version: '26.3'
+author: THE INFINIT
+description: Mercado de trocas entre jogadores do THE INFINIT.
+
+commands:
+  loja:
+    description: Abre o mercado público.
+    usage: /loja
+  store:
+    description: Gerencia suas ofertas.
+    usage: /store
+
+permissions:
+  theinfinitmarket.admin:
+    default: op
